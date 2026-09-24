@@ -44,6 +44,7 @@ pub struct Declaration {
     pub output_type: Type,
     pub qualifier: Option<LitStr>,
     pub registrations: Vec<RegistrationCapability>,
+    pub lifecycle: Option<LifecycleCapability>,
     pub dependencies: Vec<Dependency>,
     pub is_async: bool,
     pub wrapper_name: Ident,
@@ -54,6 +55,11 @@ pub struct RegistrationCapability {
     pub target_type: Type,
     pub target_qualifier: Option<LitStr>,
     pub wrapper_name: Ident,
+}
+
+pub struct LifecycleCapability {
+    pub start_wrapper_name: Ident,
+    pub shutdown_wrapper_name: Ident,
 }
 
 pub enum DeclarationKind {
@@ -111,6 +117,7 @@ pub fn parse_bundle_module(mut module: ItemMod) -> syn::Result<ParsedBundle> {
                                 function,
                                 args.qualifier,
                                 args.registrations,
+                                args.lifecycle,
                                 dependencies,
                                 source_order,
                             )
@@ -169,6 +176,7 @@ pub fn parse_bundle_module(mut module: ItemMod) -> syn::Result<ParsedBundle> {
                             structure,
                             args.qualifier,
                             args.registrations,
+                            args.lifecycle,
                             &module_name,
                             source_order,
                         )
@@ -211,6 +219,7 @@ fn provider_function(
     function: &ItemFn,
     qualifier: Option<LitStr>,
     registration_args: Vec<RegistrationArgs>,
+    lifecycle: bool,
     dependencies: Vec<Dependency>,
     source_order: usize,
 ) -> syn::Result<Declaration> {
@@ -250,12 +259,14 @@ fn provider_function(
     let wrapper = make_function_wrapper(function, &wrapper_name, false)?;
     let output_type = (**output_type).clone();
     let registrations = make_registration_capabilities(registration_args, source_order);
+    let lifecycle = lifecycle.then(|| make_lifecycle_capability(source_order));
     Ok(Declaration {
         source_order,
         kind: DeclarationKind::Provider,
         output_type,
         qualifier,
         registrations,
+        lifecycle,
         dependencies,
         is_async: false,
         wrapper_name,
@@ -296,6 +307,7 @@ fn hook_function(
         output_type: parse_quote!(()),
         qualifier: None,
         registrations: Vec::new(),
+        lifecycle: None,
         dependencies,
         is_async: function.sig.asyncness.is_some(),
         wrapper_name,
@@ -307,6 +319,7 @@ fn provider_struct(
     structure: &mut ItemStruct,
     qualifier: Option<LitStr>,
     registration_args: Vec<RegistrationArgs>,
+    lifecycle: bool,
     module: &Ident,
     source_order: usize,
 ) -> syn::Result<Declaration> {
@@ -352,6 +365,7 @@ fn provider_struct(
     let ident = &structure.ident;
     let output_type: Type = parse_quote!(crate::#module::#ident);
     let registrations = make_registration_capabilities(registration_args, source_order);
+    let lifecycle = lifecycle.then(|| make_lifecycle_capability(source_order));
     let wrapper = match &structure.fields {
         Fields::Named(_) => quote! {
             #[doc(hidden)]
@@ -374,6 +388,7 @@ fn provider_struct(
         output_type,
         qualifier,
         registrations,
+        lifecycle,
         dependencies,
         is_async: false,
         wrapper_name,
@@ -495,6 +510,7 @@ fn parse_provide_args(attribute: &Attribute) -> syn::Result<ProvideArgs> {
 struct ProvideArgs {
     qualifier: Option<LitStr>,
     registrations: Vec<RegistrationArgs>,
+    lifecycle: bool,
 }
 
 impl Parse for ProvideArgs {
@@ -515,10 +531,19 @@ impl Parse for ProvideArgs {
                     syn::parenthesized!(content in input);
                     args.registrations.push(content.parse()?);
                 }
+                "lifecycle" => {
+                    if args.lifecycle {
+                        return Err(syn::Error::new_spanned(
+                            key,
+                            "duplicate `lifecycle` provider capability",
+                        ));
+                    }
+                    args.lifecycle = true;
+                }
                 _ => {
                     return Err(syn::Error::new(
                         key.span(),
-                        "expected `qualifier = \"name\"` or `register(Type, qualifier = \"name\")`",
+                        "expected `qualifier = \"name\"`, `register(Type, qualifier = \"name\")`, or `lifecycle`",
                     ));
                 }
             }
@@ -686,7 +711,50 @@ fn push_declaration(
             .iter()
             .map(|registration| make_registration_wrapper(&declaration.output_type, registration)),
     );
+    if let Some(capability) = &declaration.lifecycle {
+        wrappers.extend(make_lifecycle_wrappers(
+            &declaration.output_type,
+            capability,
+        ));
+    }
     declarations.push(declaration);
+}
+
+fn make_lifecycle_capability(source_order: usize) -> LifecycleCapability {
+    LifecycleCapability {
+        start_wrapper_name: format_ident!("__framework_generated_lifecycle_start_{source_order}"),
+        shutdown_wrapper_name: format_ident!(
+            "__framework_generated_lifecycle_shutdown_{source_order}"
+        ),
+    }
+}
+
+fn make_lifecycle_wrappers(
+    output_type: &Type,
+    capability: &LifecycleCapability,
+) -> [TokenStream2; 2] {
+    let start_wrapper_name = &capability.start_wrapper_name;
+    let shutdown_wrapper_name = &capability.shutdown_wrapper_name;
+    let component = if is_std_arc_or_rc(output_type) {
+        quote! { &**value }
+    } else {
+        quote! { value }
+    };
+
+    [
+        quote! {
+            #[doc(hidden)]
+            pub async fn #start_wrapper_name(value: &#output_type) -> ::framework::LifecycleResult {
+                ::framework::Lifecycle::start(#component).await
+            }
+        },
+        quote! {
+            #[doc(hidden)]
+            pub async fn #shutdown_wrapper_name(value: &#output_type) -> ::framework::LifecycleResult {
+                ::framework::Lifecycle::shutdown(#component).await
+            }
+        },
+    ]
 }
 
 fn make_registration_capabilities(
@@ -839,6 +907,22 @@ pub fn bundle_metadata_records(
                     { registrations { #(#registrations)* } }
                 }
             });
+            let lifecycle_field = declaration
+                .lifecycle
+                .as_ref()
+                .map(|capability| {
+                    let start_wrapper_name = &capability.start_wrapper_name;
+                    let shutdown_wrapper_name = &capability.shutdown_wrapper_name;
+                    quote! {
+                        {
+                            lifecycle {
+                                { enabled { true } }
+                                { start { callable { $crate :: #module :: #start_wrapper_name } } }
+                                { shutdown { callable { $crate :: #module :: #shutdown_wrapper_name } } }
+                            }
+                        }
+                    }
+                });
             quote! {
                 {
                     framework_bundle_metadata_v1
@@ -852,6 +936,7 @@ pub fn bundle_metadata_records(
                     { dependencies { #(#dependencies)* } }
                     { callable { $crate :: #module :: #wrapper_name } }
                     #registrations_field
+                    #lifecycle_field
                 }
             }
         })

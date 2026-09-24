@@ -4,9 +4,9 @@ use proc_macro2::{Ident, Span, TokenStream as TokenStream2};
 use quote::ToTokens;
 use quote::{format_ident, quote};
 use syn::{
-    GenericArgument, Item, ItemMod, LitInt, LitStr, Path, PathArguments, PathSegment, Type,
-    TypePath, UseTree, braced, bracketed, parse::Parse, parse::ParseStream, parse_quote, parse2,
-    spanned::Spanned, visit::Visit, visit_mut::VisitMut,
+    GenericArgument, Item, ItemMod, LitBool, LitInt, LitStr, Path, PathArguments, PathSegment,
+    Type, TypePath, UseTree, braced, bracketed, parse::Parse, parse::ParseStream, parse_quote,
+    parse2, spanned::Spanned, visit::Visit, visit_mut::VisitMut,
 };
 
 use crate::{
@@ -154,7 +154,7 @@ pub fn compose(input: TokenStream2) -> syn::Result<TokenStream2> {
     let Some((_, items)) = module.content.as_mut() else {
         unreachable!("parse_bundle_module validates inline modules")
     };
-    items.push(parse2::<Item>(generated)?);
+    items.extend(parse2::<syn::File>(generated)?.items);
     Ok(quote! { #module })
 }
 
@@ -249,12 +249,19 @@ struct BundleRecord {
     declaration: Declaration,
     callable: TokenStream2,
     registrations: Vec<BundleRegistration>,
+    lifecycle: Option<LifecycleCallables>,
 }
 
 struct BundleRegistration {
     target_type: Type,
     target_qualifier: Option<LitStr>,
     callable: TokenStream2,
+}
+
+#[derive(Clone)]
+struct LifecycleCallables {
+    start: TokenStream2,
+    shutdown: TokenStream2,
 }
 
 impl Parse for BundleRecord {
@@ -278,6 +285,7 @@ impl Parse for BundleRecord {
         let mut dependencies = None;
         let mut callable = None;
         let mut registrations = None;
+        let mut lifecycle = None;
 
         while !content.is_empty() {
             let field_content;
@@ -290,7 +298,7 @@ impl Parse for BundleRecord {
                 "kind" => kind = Some(field_content.parse::<Ident>()?),
                 "execution" => execution = Some(field_content.parse::<Ident>()?),
                 "bundle_macro" | "source_module" | "output_type" | "qualifier" | "dependencies"
-                | "callable" | "registrations" => {
+                | "callable" | "registrations" | "lifecycle" => {
                     let value;
                     braced!(value in field_content);
                     match field.to_string().as_str() {
@@ -321,6 +329,7 @@ impl Parse for BundleRecord {
                             }
                             registrations = Some(parsed);
                         }
+                        "lifecycle" => lifecycle = Some(parse_record_lifecycle(&value)?),
                         _ => unreachable!("the field was matched above"),
                     }
                     if !value.is_empty() {
@@ -357,6 +366,12 @@ impl Parse for BundleRecord {
                 ));
             }
         };
+        if lifecycle.is_some() && matches!(&kind, DeclarationKind::HookStart) {
+            return Err(syn::Error::new(
+                source_module.span(),
+                "lifecycle capabilities are only supported on providers",
+            ));
+        }
         let is_async = match execution
             .ok_or_else(|| content.error("missing declaration execution kind"))?
             .to_string()
@@ -380,6 +395,7 @@ impl Parse for BundleRecord {
                 output_type: output_type.ok_or_else(|| content.error("missing output type"))?,
                 qualifier: qualifier.ok_or_else(|| content.error("missing qualifier field"))?,
                 registrations: Vec::new(),
+                lifecycle: None,
                 dependencies: dependencies
                     .ok_or_else(|| content.error("missing dependency list"))?,
                 is_async,
@@ -388,8 +404,64 @@ impl Parse for BundleRecord {
             },
             callable: callable.ok_or_else(|| content.error("missing callable path"))?,
             registrations: registrations.unwrap_or_default(),
+            lifecycle,
         })
     }
+}
+
+fn parse_record_lifecycle(input: ParseStream<'_>) -> syn::Result<LifecycleCallables> {
+    let mut enabled = None;
+    let mut start = None;
+    let mut shutdown = None;
+    while !input.is_empty() {
+        let field_content;
+        braced!(field_content in input);
+        let field: Ident = field_content.parse()?;
+        let value;
+        braced!(value in field_content);
+        match field.to_string().as_str() {
+            "enabled" => enabled = Some(value.parse::<LitBool>()?.value),
+            "start" => start = Some(parse_record_lifecycle_callable(&value)?),
+            "shutdown" => shutdown = Some(parse_record_lifecycle_callable(&value)?),
+            _ => {
+                return Err(syn::Error::new(
+                    field.span(),
+                    "unknown lifecycle metadata field",
+                ));
+            }
+        }
+        if !value.is_empty() || !field_content.is_empty() {
+            return Err(field_content.error("unexpected tokens in lifecycle metadata field"));
+        }
+    }
+
+    if !enabled.ok_or_else(|| input.error("missing lifecycle enabled flag"))? {
+        return Err(input.error("disabled lifecycle metadata must be omitted"));
+    }
+    Ok(LifecycleCallables {
+        start: start.ok_or_else(|| input.error("missing lifecycle start callable"))?,
+        shutdown: shutdown.ok_or_else(|| input.error("missing lifecycle shutdown callable"))?,
+    })
+}
+
+fn parse_record_lifecycle_callable(input: ParseStream<'_>) -> syn::Result<TokenStream2> {
+    let field: Ident = input.parse()?;
+    if field != "callable" {
+        return Err(syn::Error::new(
+            field.span(),
+            "expected lifecycle callable metadata",
+        ));
+    }
+    let path_content;
+    braced!(path_content in input);
+    let callable = path_content.parse::<TokenStream2>()?;
+    if callable.is_empty() {
+        return Err(path_content.error("missing lifecycle callable path"));
+    }
+    if !path_content.is_empty() || !input.is_empty() {
+        return Err(input.error("unexpected tokens after lifecycle callable"));
+    }
+    Ok(callable)
 }
 
 fn parse_record_registration(input: ParseStream<'_>) -> syn::Result<BundleRegistration> {
@@ -482,6 +554,7 @@ struct CompositionEntry {
     import_prefix: Option<Ident>,
     origin: String,
     registrations: Vec<CompositionRegistration>,
+    lifecycle: Option<LifecycleCallables>,
 }
 
 struct CompositionRegistration {
@@ -501,6 +574,7 @@ fn local_registration(registration: &RegistrationCapability) -> CompositionRegis
 
 impl CompositionEntry {
     fn from_import(record: BundleRecord, prefix: Ident, import_path: String) -> Self {
+        let lifecycle = record.lifecycle;
         let registrations = record
             .registrations
             .into_iter()
@@ -519,6 +593,7 @@ impl CompositionEntry {
             callable: record.callable,
             import_prefix: Some(prefix),
             registrations,
+            lifecycle,
         }
     }
 
@@ -528,6 +603,14 @@ impl CompositionEntry {
             .into_iter()
             .map(|declaration| {
                 let wrapper_name = &declaration.wrapper_name;
+                let lifecycle = declaration.lifecycle.as_ref().map(|capability| {
+                    let start = &capability.start_wrapper_name;
+                    let shutdown = &capability.shutdown_wrapper_name;
+                    LifecycleCallables {
+                        start: quote! { #start },
+                        shutdown: quote! { #shutdown },
+                    }
+                });
                 let registrations = declaration
                     .registrations
                     .iter()
@@ -539,6 +622,7 @@ impl CompositionEntry {
                     import_prefix: None,
                     origin: format!("application module `{module_name}`"),
                     registrations,
+                    lifecycle,
                 }
             })
             .collect()
@@ -561,9 +645,11 @@ struct PreparedEntry {
     key: Option<Key>,
     dependencies: Vec<PreparedDependency>,
     registrations: Vec<PreparedRegistration>,
+    lifecycle: Option<LifecycleCallables>,
     callable: TokenStream2,
     is_async: bool,
     output_span: Span,
+    component_identifier: Option<String>,
     origin: String,
 }
 
@@ -668,9 +754,18 @@ fn compose_entries(entries: &[CompositionEntry]) -> syn::Result<TokenStream2> {
             key: key.clone(),
             dependencies,
             registrations,
+            lifecycle: entry.lifecycle.clone(),
             callable: entry.callable.clone(),
             is_async: entry.declaration.is_async,
             output_span,
+            component_identifier: key.as_ref().map(|key| {
+                format!(
+                    "{} provider declaration {} ({})",
+                    entry.origin,
+                    entry.declaration.source_order,
+                    display_key(key)
+                )
+            }),
             origin: entry.origin.clone(),
         };
         match kind {
@@ -1037,6 +1132,61 @@ fn codegen(
         quote! { #callable(&#registrar, &mut #target); }
     });
 
+    let mut lifecycle_starts = Vec::new();
+    let mut lifecycle_shutdowns = Vec::new();
+    for provider_id in &plan.construction_order {
+        let entry_index = provider_entry_indices[provider_id.0];
+        let entry = &entries[entry_index];
+        let Some(lifecycle) = &entry.lifecycle else {
+            continue;
+        };
+        let value = provider_value(*provider_id);
+        let provider_index = LitInt::new(&provider_id.0.to_string(), Span::call_site());
+        let component = LitStr::new(
+            entry
+                .component_identifier
+                .as_deref()
+                .expect("lifecycle capability belongs to a provider"),
+            Span::call_site(),
+        );
+        let start = &lifecycle.start;
+        let shutdown = &lifecycle.shutdown;
+        lifecycle_starts.push(quote! {
+            if !__framework_stopped && !__framework_start_failed {
+                match #start(&#value).await {
+                    ::std::result::Result::Ok(()) => {
+                        __framework_started.push(#provider_index);
+                        if !__framework_one_shot
+                            && __framework_poll_stop_once(__framework_stop.as_mut()).await
+                        {
+                            __framework_stopped = true;
+                        }
+                    }
+                    ::std::result::Result::Err(error) => {
+                        __framework_errors.push(::framework::LifecycleFailure::new(
+                            ::framework::LifecyclePhase::Start,
+                            #component,
+                            error,
+                        ));
+                        __framework_start_failed = true;
+                    }
+                }
+            }
+        });
+        lifecycle_shutdowns.push(quote! {
+            if __framework_started.last() == ::std::option::Option::Some(&#provider_index) {
+                let _ = __framework_started.pop();
+                if let ::std::result::Result::Err(error) = #shutdown(&#value).await {
+                    __framework_errors.push(::framework::LifecycleFailure::new(
+                        ::framework::LifecyclePhase::Shutdown,
+                        #component,
+                        error,
+                    ));
+                }
+            }
+        });
+    }
+
     let mut hooks = Vec::new();
     for (root_index, entry_index) in root_entry_indices.iter().enumerate() {
         let entry = &entries[*entry_index];
@@ -1057,17 +1207,104 @@ fn codegen(
             .collect::<Vec<_>>();
         let callable = &entry.callable;
         if entry.is_async {
-            hooks.push(quote! { #callable(#(#args),*).await; });
+            hooks.push(quote! {
+                if !__framework_one_shot && !__framework_stopped && !__framework_start_failed
+                    && __framework_poll_stop_once(__framework_stop.as_mut()).await
+                {
+                    __framework_stopped = true;
+                }
+                if !__framework_stopped && !__framework_start_failed {
+                    #callable(#(#args),*).await;
+                }
+            });
         } else {
-            hooks.push(quote! { #callable(#(#args),*); });
+            hooks.push(quote! {
+                if !__framework_one_shot && !__framework_stopped && !__framework_start_failed
+                    && __framework_poll_stop_once(__framework_stop.as_mut()).await
+                {
+                    __framework_stopped = true;
+                }
+                if !__framework_stopped && !__framework_start_failed {
+                    #callable(#(#args),*);
+                }
+            });
         }
     }
 
+    let lifecycle_shutdowns = lifecycle_shutdowns.into_iter().rev().collect::<Vec<_>>();
+
     Ok(quote! {
-        pub async fn run() {
+        #[doc(hidden)]
+        async fn __framework_run_internal<__FrameworkStop>(
+            __framework_stop_future: __FrameworkStop,
+            __framework_one_shot: bool,
+        ) -> ::std::result::Result<(), ::framework::RunError>
+        where
+            __FrameworkStop: ::std::future::Future<Output = ()>,
+        {
+            async fn __framework_poll_stop_once<__FrameworkStop>(
+                mut __framework_stop: ::std::pin::Pin<&mut __FrameworkStop>,
+            ) -> bool
+            where
+                __FrameworkStop: ::std::future::Future<Output = ()>,
+            {
+                ::std::future::poll_fn(|__framework_context| {
+                    ::std::task::Poll::Ready(
+                        ::std::future::Future::poll(
+                            __framework_stop.as_mut(),
+                            __framework_context,
+                        )
+                        .is_ready(),
+                    )
+                })
+                .await
+            }
+
             #(#constructions)*
             #(#registration_calls)*
+
+            let mut __framework_stop = ::std::pin::pin!(__framework_stop_future);
+            let mut __framework_errors = ::framework::RunError::new();
+            let mut __framework_started = ::std::vec::Vec::<usize>::new();
+            let mut __framework_start_failed = false;
+            let mut __framework_stopped = if __framework_one_shot {
+                false
+            } else {
+                __framework_poll_stop_once(__framework_stop.as_mut()).await
+            };
+
+            #(#lifecycle_starts)*
             #(#hooks)*
+
+            if !__framework_one_shot
+                && !__framework_stopped
+                && !__framework_start_failed
+            {
+                __framework_stop.as_mut().await;
+            }
+
+            #(#lifecycle_shutdowns)*
+
+            if __framework_errors.failures().is_empty() {
+                ::std::result::Result::Ok(())
+            } else {
+                ::std::result::Result::Err(__framework_errors)
+            }
+        }
+
+        #[doc = "Runs a one-shot application: starts reachable lifecycle components, runs hooks, then awaits shutdown in reverse start order."]
+        pub async fn run() -> ::std::result::Result<(), ::framework::RunError> {
+            __framework_run_internal(::std::future::pending::<()>(), true).await
+        }
+
+        #[doc = "Runs until the supplied stop future completes. The future is polled during startup and hooks, then awaited after hooks if still pending. Successful lifecycle components are shut down and awaited in reverse start order."]
+        pub async fn run_until<__FrameworkStop>(
+            __framework_stop: __FrameworkStop,
+        ) -> ::std::result::Result<(), ::framework::RunError>
+        where
+            __FrameworkStop: ::std::future::Future<Output = ()>,
+        {
+            __framework_run_internal(__framework_stop, false).await
         }
     })
 }
@@ -1089,27 +1326,48 @@ fn reject_run_collision(module: &ItemMod) -> syn::Result<()> {
     let Some((_, items)) = &module.content else {
         return Ok(());
     };
-    if let Some(item) = items.iter().find(|item| match item {
-        Item::Fn(function) => function.sig.ident == "run",
-        Item::Const(item) => item.ident == "run",
-        Item::Static(item) => item.ident == "run",
-        Item::Use(item) => use_tree_binds_run(&item.tree),
-        _ => false,
-    }) {
-        return Err(syn::Error::new_spanned(
-            item,
-            "application module already defines `run`, which conflicts with generated `pub async fn run()`",
-        ));
+    for (name, generated_signature) in [
+        ("run", "pub async fn run()"),
+        (
+            "run_until",
+            "pub async fn run_until(stop: impl Future<Output = ()>)",
+        ),
+        (
+            "__framework_run_internal",
+            "the generated framework runner helper",
+        ),
+    ] {
+        if let Some(item) = items.iter().find(|item| item_binds_value_name(item, name)) {
+            return Err(syn::Error::new_spanned(
+                item,
+                format!(
+                    "application module already defines `{name}`, which conflicts with generated `{generated_signature}`"
+                ),
+            ));
+        }
     }
     Ok(())
 }
 
-fn use_tree_binds_run(tree: &UseTree) -> bool {
+fn item_binds_value_name(item: &Item, name: &str) -> bool {
+    match item {
+        Item::Fn(function) => function.sig.ident == name,
+        Item::Const(item) => item.ident == name,
+        Item::Static(item) => item.ident == name,
+        Item::Use(item) => use_tree_binds_name(&item.tree, name),
+        _ => false,
+    }
+}
+
+fn use_tree_binds_name(tree: &UseTree, name: &str) -> bool {
     match tree {
-        UseTree::Path(path) => use_tree_binds_run(&path.tree),
-        UseTree::Name(name) => name.ident == "run",
-        UseTree::Rename(rename) => rename.rename == "run",
-        UseTree::Group(group) => group.items.iter().any(use_tree_binds_run),
+        UseTree::Path(path) => use_tree_binds_name(&path.tree, name),
+        UseTree::Name(import) => import.ident == name,
+        UseTree::Rename(rename) => rename.rename == name,
+        UseTree::Group(group) => group
+            .items
+            .iter()
+            .any(|item| use_tree_binds_name(item, name)),
         UseTree::Glob(_) => false,
     }
 }
@@ -1249,6 +1507,25 @@ mod tests {
             let module = syn::parse_str::<ItemMod>(source).expect("test module should parse");
             let error = reject_run_collision(&module).expect_err("run import should conflict");
             assert!(error.to_string().contains("already defines `run`"));
+        }
+    }
+
+    #[test]
+    fn rejects_run_until_and_internal_runner_collisions() {
+        for (source, name) in [
+            ("mod app { async fn run_until() {} }", "run_until"),
+            (
+                "mod app { use crate::tools::stop as run_until; }",
+                "run_until",
+            ),
+            (
+                "mod app { async fn __framework_run_internal() {} }",
+                "__framework_run_internal",
+            ),
+        ] {
+            let module = syn::parse_str::<ItemMod>(source).expect("test module should parse");
+            let error = reject_run_collision(&module).expect_err("generated name should conflict");
+            assert!(error.to_string().contains(name));
         }
     }
 

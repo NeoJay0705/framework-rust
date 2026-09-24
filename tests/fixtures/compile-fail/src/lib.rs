@@ -7,6 +7,7 @@ pub struct RegistrationProvider;
 pub struct NoRegistrationImpl;
 pub struct MissingRegistrationTarget;
 pub struct SelfTarget;
+pub struct NoLifecycleImplementation;
 
 impl framework::Register<RegistrationTarget> for RegistrationProvider {
     fn register(&self, _: &mut RegistrationTarget) {}
@@ -228,4 +229,37 @@ mod registration_bad_syntax {
     fn registrar() -> crate::RegistrationProvider {
         crate::RegistrationProvider
     }
+}
+
+#[cfg(feature = "case-lifecycle-missing-impl")]
+#[framework::application]
+mod lifecycle_missing_impl {
+    #[provide(lifecycle)]
+    fn no_impl() -> crate::NoLifecycleImplementation {
+        crate::NoLifecycleImplementation
+    }
+}
+
+#[cfg(feature = "case-lifecycle-duplicate")]
+#[framework::application]
+mod lifecycle_duplicate {
+    #[provide(lifecycle, lifecycle)]
+    fn duplicate() -> crate::NoLifecycleImplementation {
+        crate::NoLifecycleImplementation
+    }
+}
+
+#[cfg(feature = "case-lifecycle-invalid-marker")]
+#[framework::application]
+mod lifecycle_invalid_marker {
+    #[provide(lifecycle = "enabled")]
+    fn invalid() -> crate::NoLifecycleImplementation {
+        crate::NoLifecycleImplementation
+    }
+}
+
+#[cfg(feature = "case-run-until-collision")]
+#[framework::application]
+mod run_until_collision {
+    async fn run_until() {}
 }

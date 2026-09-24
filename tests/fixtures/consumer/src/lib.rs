@@ -206,3 +206,195 @@ impl framework::Register<common_one::Registry> for runtime_registration_app::Uni
         common_one::record("register.unit");
     }
 }
+
+pub struct LocalRcLifecycle;
+pub struct UnreachableLifecycle;
+
+impl framework::Lifecycle for LocalRcLifecycle {
+    async fn start(&self) -> framework::LifecycleResult {
+        common_one::record("start.lifecycle-local");
+        Ok(())
+    }
+
+    async fn shutdown(&self) -> framework::LifecycleResult {
+        common_one::record("shutdown.lifecycle-local");
+        Ok(())
+    }
+}
+
+impl framework::Register<common_one::Registry> for LocalRcLifecycle {
+    fn register(&self, target: &mut common_one::Registry) {
+        target.push("lifecycle-local");
+        common_one::record("register.lifecycle-local");
+    }
+}
+
+impl framework::Lifecycle for UnreachableLifecycle {
+    async fn start(&self) -> framework::LifecycleResult {
+        common_one::record("start.lifecycle-unreachable");
+        Ok(())
+    }
+
+    async fn shutdown(&self) -> framework::LifecycleResult {
+        common_one::record("shutdown.lifecycle-unreachable");
+        Ok(())
+    }
+}
+
+#[framework::application(imports(common_one::common_bundle, common_two::other_bundle))]
+pub mod lifecycle_app {
+    #[provide(lifecycle, register(common_one::Registry, qualifier = "primary"))]
+    fn local_component() -> std::rc::Rc<crate::LocalRcLifecycle> {
+        common_one::record("construct.lifecycle-local");
+        std::rc::Rc::new(crate::LocalRcLifecycle)
+    }
+
+    #[provide(lifecycle)]
+    fn unreachable_component() -> crate::UnreachableLifecycle {
+        common_one::record("construct.lifecycle-unreachable");
+        crate::UnreachableLifecycle
+    }
+
+    #[hook(start)]
+    fn observe_lifecycle_components(
+        #[inject("primary")] _registry: &common_one::Registry,
+        _common: &common_one::CommonLifecycle,
+        _other: std::sync::Arc<common_two::OtherLifecycle>,
+        _local: std::rc::Rc<crate::LocalRcLifecycle>,
+    ) {
+        common_one::record("hook.lifecycle-app");
+    }
+}
+
+#[derive(Debug)]
+pub struct LifecycleTestError(pub &'static str);
+
+impl std::fmt::Display for LifecycleTestError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.0)
+    }
+}
+
+impl std::error::Error for LifecycleTestError {}
+
+pub struct RollbackFirst;
+pub struct RollbackSecond;
+pub struct RollbackFailure;
+pub struct RollbackNeverStarted;
+
+impl framework::Lifecycle for RollbackFirst {
+    async fn start(&self) -> framework::LifecycleResult {
+        common_one::record("start.rollback-first");
+        Ok(())
+    }
+
+    async fn shutdown(&self) -> framework::LifecycleResult {
+        common_one::record("shutdown.rollback-first");
+        Err(Box::new(LifecycleTestError("first shutdown")))
+    }
+}
+
+impl framework::Lifecycle for RollbackSecond {
+    async fn start(&self) -> framework::LifecycleResult {
+        common_one::record("start.rollback-second");
+        Ok(())
+    }
+
+    async fn shutdown(&self) -> framework::LifecycleResult {
+        common_one::record("shutdown.rollback-second");
+        Err(Box::new(LifecycleTestError("second shutdown")))
+    }
+}
+
+impl framework::Lifecycle for RollbackFailure {
+    async fn start(&self) -> framework::LifecycleResult {
+        common_one::record("start.rollback-failure");
+        Err(Box::new(LifecycleTestError("start failure")))
+    }
+
+    async fn shutdown(&self) -> framework::LifecycleResult {
+        common_one::record("shutdown.rollback-failure");
+        Ok(())
+    }
+}
+
+impl framework::Lifecycle for RollbackNeverStarted {
+    async fn start(&self) -> framework::LifecycleResult {
+        common_one::record("start.rollback-never");
+        Ok(())
+    }
+
+    async fn shutdown(&self) -> framework::LifecycleResult {
+        common_one::record("shutdown.rollback-never");
+        Ok(())
+    }
+}
+
+#[framework::application]
+pub mod lifecycle_failure_app {
+    #[provide(lifecycle)]
+    fn first() -> crate::RollbackFirst {
+        crate::RollbackFirst
+    }
+
+    #[provide(lifecycle)]
+    fn second(_first: &crate::RollbackFirst) -> crate::RollbackSecond {
+        crate::RollbackSecond
+    }
+
+    #[provide(lifecycle)]
+    fn fail(_second: &crate::RollbackSecond) -> crate::RollbackFailure {
+        crate::RollbackFailure
+    }
+
+    #[provide(lifecycle)]
+    fn never_started() -> crate::RollbackNeverStarted {
+        crate::RollbackNeverStarted
+    }
+
+    #[hook(start)]
+    fn observe_failure(_failure: &crate::RollbackFailure, _never: &crate::RollbackNeverStarted) {
+        common_one::record("hook.rollback");
+    }
+}
+
+#[framework::application]
+pub mod lifecycle_struct_app {
+    #[provide(lifecycle)]
+    pub struct NamedLifecycleStruct {}
+
+    impl framework::Lifecycle for NamedLifecycleStruct {
+        async fn start(&self) -> framework::LifecycleResult {
+            common_one::record("start.lifecycle-named-struct");
+            Ok(())
+        }
+
+        async fn shutdown(&self) -> framework::LifecycleResult {
+            common_one::record("shutdown.lifecycle-named-struct");
+            Ok(())
+        }
+    }
+
+    #[provide(lifecycle)]
+    pub struct UnitLifecycleStruct;
+
+    impl framework::Lifecycle for UnitLifecycleStruct {
+        async fn start(&self) -> framework::LifecycleResult {
+            common_one::record("start.lifecycle-unit-struct");
+            Ok(())
+        }
+
+        async fn shutdown(&self) -> framework::LifecycleResult {
+            common_one::record("shutdown.lifecycle-unit-struct");
+            Ok(())
+        }
+    }
+
+    #[hook(start)]
+    fn observe_struct_components(
+        _named: &crate::lifecycle_struct_app::NamedLifecycleStruct,
+        _unit: &crate::lifecycle_struct_app::UnitLifecycleStruct,
+    ) {
+        common_one::record("hook.lifecycle-structs");
+    }
+}

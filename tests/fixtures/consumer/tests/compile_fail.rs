@@ -42,6 +42,16 @@ fn reports_stable_terms_for_graph_and_declaration_errors() {
             "case-registration-bad-syntax",
             "expected `qualifier = \"name\"` after registration target type",
         ),
+        ("case-lifecycle-missing-impl", "Lifecycle"),
+        (
+            "case-lifecycle-duplicate",
+            "duplicate `lifecycle` provider capability",
+        ),
+        (
+            "case-lifecycle-invalid-marker",
+            "expected `,` between provider attributes",
+        ),
+        ("case-run-until-collision", "already defines `run_until`"),
     ];
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../compile-fail/Cargo.toml");
     let target_dir = std::env::temp_dir().join(format!(

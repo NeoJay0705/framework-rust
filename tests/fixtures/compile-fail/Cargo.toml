@@ -24,6 +24,10 @@ case-registration-target-unreachable = []
 case-registration-self-target = []
 case-duplicate-registration = []
 case-registration-bad-syntax = []
+case-lifecycle-missing-impl = []
+case-lifecycle-duplicate = []
+case-lifecycle-invalid-marker = []
+case-run-until-collision = []
 
 [dependencies]
 framework = { path = "../../../crates/framework" }

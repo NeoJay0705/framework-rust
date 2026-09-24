@@ -24,6 +24,20 @@ pub fn take_events() -> Vec<&'static str> {
 
 pub struct Config(pub usize);
 pub struct Database(pub usize);
+pub struct CommonLifecycle;
+
+impl framework::Lifecycle for CommonLifecycle {
+    async fn start(&self) -> framework::LifecycleResult {
+        record("start.lifecycle-common");
+        Ok(())
+    }
+
+    async fn shutdown(&self) -> framework::LifecycleResult {
+        record("shutdown.lifecycle-common");
+        Ok(())
+    }
+}
+
 pub struct Registry {
     values: Arc<Mutex<Vec<&'static str>>>,
 }
@@ -140,6 +154,12 @@ pub mod common {
     fn implicit_routes() -> crate::ImplicitRoutes {
         crate::record("construct.implicit-routes");
         crate::ImplicitRoutes
+    }
+
+    #[provide(lifecycle)]
+    fn lifecycle_component() -> crate::CommonLifecycle {
+        crate::record("construct.lifecycle-common");
+        crate::CommonLifecycle
     }
 
     #[hook(start)]
