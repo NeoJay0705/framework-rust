@@ -2,6 +2,9 @@
 members = [
     "crates/framework",
     "crates/framework-macros",
+    "tests/fixtures/common-one",
+    "tests/fixtures/common-two",
+    "tests/fixtures/consumer",
 ]
 resolver = "3"
 

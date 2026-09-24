@@ -2,41 +2,41 @@ use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-struct TypeKey(String);
+pub(crate) struct TypeKey(pub(crate) String);
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-struct QualifierKey(String);
+pub(crate) struct QualifierKey(pub(crate) String);
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-struct Key {
-    type_key: TypeKey,
-    qualifier: Option<QualifierKey>,
+pub(crate) struct Key {
+    pub(crate) type_key: TypeKey,
+    pub(crate) qualifier: Option<QualifierKey>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-struct ProviderId(usize);
+pub(crate) struct ProviderId(pub(crate) usize);
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-struct RootId(usize);
+pub(crate) struct RootId(pub(crate) usize);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct Request {
-    key: Key,
+pub(crate) struct Request {
+    pub(crate) key: Key,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct ProviderDescriptor {
-    key: Key,
-    dependencies: Vec<Request>,
+pub(crate) struct ProviderDescriptor {
+    pub(crate) key: Key,
+    pub(crate) dependencies: Vec<Request>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct RootDescriptor {
-    dependencies: Vec<Request>,
+pub(crate) struct RootDescriptor {
+    pub(crate) dependencies: Vec<Request>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-enum RequestSlot {
+pub(crate) enum RequestSlot {
     Root {
         root: RootId,
         dependency_index: usize,
@@ -48,19 +48,19 @@ enum RequestSlot {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct RequestBinding {
-    slot: RequestSlot,
-    provider: ProviderId,
+pub(crate) struct RequestBinding {
+    pub(crate) slot: RequestSlot,
+    pub(crate) provider: ProviderId,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct GraphPlan {
-    construction_order: Vec<ProviderId>,
-    bindings: Vec<RequestBinding>,
+pub(crate) struct GraphPlan {
+    pub(crate) construction_order: Vec<ProviderId>,
+    pub(crate) bindings: Vec<RequestBinding>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-enum GraphError {
+pub(crate) enum GraphError {
     DuplicateProvider {
         key: Key,
         provider_ids: Vec<ProviderId>,
@@ -177,7 +177,7 @@ impl ProviderIndex {
     }
 }
 
-fn resolve(
+pub(crate) fn resolve(
     providers: &[ProviderDescriptor],
     roots: &[RootDescriptor],
 ) -> Result<GraphPlan, GraphError> {

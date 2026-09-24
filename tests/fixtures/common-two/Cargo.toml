@@ -1,0 +1,9 @@
+[package]
+name = "common-two"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+common-one = { path = "../common-one" }
+framework = { path = "../../../crates/framework" }

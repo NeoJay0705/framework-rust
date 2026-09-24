@@ -1,0 +1,10 @@
+[package]
+name = "composition-consumer-fixture"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+common-one = { path = "../common-one" }
+common-two = { path = "../common-two" }
+framework = { path = "../../../crates/framework" }
