@@ -2,6 +2,7 @@
 members = [
     "crates/framework",
     "crates/framework-macros",
+    "examples/composition-guide",
     "tests/fixtures/common-one",
     "tests/fixtures/common-two",
     "tests/fixtures/consumer",

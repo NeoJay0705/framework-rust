@@ -1,0 +1,8 @@
+[package]
+name = "composition-guide"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+framework = { path = "../../crates/framework" }
