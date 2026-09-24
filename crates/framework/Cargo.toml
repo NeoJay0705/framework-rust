@@ -1,0 +1,7 @@
+[package]
+name = "framework"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+framework-macros = { path = "../framework-macros" }
