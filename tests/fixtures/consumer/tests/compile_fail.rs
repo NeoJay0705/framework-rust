@@ -12,6 +12,36 @@ fn reports_stable_terms_for_graph_and_declaration_errors() {
             "generic provider functions are not supported",
         ),
         ("case-duplicate-provider", "duplicate provider for"),
+        ("case-missing-register-impl", "Register<"),
+        ("case-missing-register-impl-unreachable", "Register<"),
+        (
+            "case-registration-target-missing",
+            "missing provider for type",
+        ),
+        (
+            "case-registration-target-ambiguous",
+            "ambiguous provider for type",
+        ),
+        (
+            "case-registration-target-invalid-qualifier",
+            "invalid qualifier for type",
+        ),
+        (
+            "case-registration-target-unreachable",
+            "is not reachable from any hook",
+        ),
+        (
+            "case-registration-self-target",
+            "a provider cannot register itself",
+        ),
+        (
+            "case-duplicate-registration",
+            "duplicate registration capability",
+        ),
+        (
+            "case-registration-bad-syntax",
+            "expected `qualifier = \"name\"` after registration target type",
+        ),
     ];
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../compile-fail/Cargo.toml");
     let target_dir = std::env::temp_dir().join(format!(

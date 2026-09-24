@@ -45,6 +45,10 @@ pub(crate) enum RequestSlot {
         provider: ProviderId,
         dependency_index: usize,
     },
+    Registration {
+        provider: ProviderId,
+        registration_index: usize,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -97,13 +101,13 @@ struct Frame {
     next_dependency: usize,
 }
 
-struct ProviderIndex {
+pub(crate) struct ProviderIndex {
     exact: HashMap<Key, ProviderId>,
     by_type: HashMap<TypeKey, Vec<ProviderId>>,
 }
 
 impl ProviderIndex {
-    fn new(providers: &[ProviderDescriptor]) -> Result<Self, GraphError> {
+    pub(crate) fn new(providers: &[ProviderDescriptor]) -> Result<Self, GraphError> {
         let mut ids_by_key: HashMap<Key, Vec<ProviderId>> = HashMap::new();
         let mut first_duplicate_key = None;
 
@@ -137,7 +141,7 @@ impl ProviderIndex {
         Ok(Self { exact, by_type })
     }
 
-    fn resolve_request(
+    pub(crate) fn resolve_request(
         &self,
         request: &Request,
         requester: RequestSlot,

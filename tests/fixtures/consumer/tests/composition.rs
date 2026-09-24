@@ -70,3 +70,51 @@ fn composes_and_runs_an_application_with_one_import() {
         ]
     );
 }
+
+#[test]
+fn registers_reachable_components_before_hooks_with_stable_dependency_order() {
+    let _guard = TEST_LOCK.lock().expect("test lock poisoned");
+    common_one::reset_events();
+
+    block_on(composition_consumer_fixture::runtime_registration_app::run());
+
+    let events = common_one::take_events();
+    assert_eq!(
+        events,
+        [
+            "construct.config",
+            "construct.registry-primary",
+            "construct.registry-alternate",
+            "construct.common-routes",
+            "construct.implicit-routes",
+            "construct.other",
+            "construct.later",
+            "construct.first",
+            "construct.arc",
+            "construct.rc",
+            "construct.qualified",
+            "register.common",
+            "register.later",
+            "register.first",
+            "register.arc",
+            "register.rc",
+            "register.named",
+            "register.unit",
+            "register.qualified",
+            "hook.common",
+            "hook.other-async",
+            "hook.runtime-primary",
+            "hook.runtime-alternate",
+        ]
+    );
+    assert!(!events.contains(&"register.implicit-discovered"));
+    assert_eq!(
+        common_one::registry_values("primary"),
+        ["common", "later", "first"]
+    );
+    assert_eq!(common_one::registry_effective("primary"), Some("first"));
+    assert_eq!(
+        common_one::registry_values("alternate"),
+        ["arc", "rc", "named", "unit", "qualified"]
+    );
+}

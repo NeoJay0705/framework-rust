@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use proc_macro2::{Ident, Span, TokenStream as TokenStream2};
 use quote::ToTokens;
@@ -10,10 +10,13 @@ use syn::{
 };
 
 use crate::{
-    declaration::{Declaration, DeclarationKind, Dependency, ParsedBundle, parse_bundle_module},
+    declaration::{
+        Declaration, DeclarationKind, Dependency, ParsedBundle, RegistrationCapability,
+        parse_bundle_module,
+    },
     graph::{
-        GraphError, GraphPlan, Key, ProviderDescriptor, ProviderId, QualifierKey, Request,
-        RequestSlot, RootDescriptor, RootId, TypeKey,
+        GraphError, GraphPlan, Key, ProviderDescriptor, ProviderId, ProviderIndex, QualifierKey,
+        Request, RequestSlot, RootDescriptor, RootId, TypeKey,
     },
 };
 
@@ -245,6 +248,13 @@ struct BundleRecord {
     source_module: Ident,
     declaration: Declaration,
     callable: TokenStream2,
+    registrations: Vec<BundleRegistration>,
+}
+
+struct BundleRegistration {
+    target_type: Type,
+    target_qualifier: Option<LitStr>,
+    callable: TokenStream2,
 }
 
 impl Parse for BundleRecord {
@@ -267,6 +277,7 @@ impl Parse for BundleRecord {
         let mut qualifier = None;
         let mut dependencies = None;
         let mut callable = None;
+        let mut registrations = None;
 
         while !content.is_empty() {
             let field_content;
@@ -279,7 +290,7 @@ impl Parse for BundleRecord {
                 "kind" => kind = Some(field_content.parse::<Ident>()?),
                 "execution" => execution = Some(field_content.parse::<Ident>()?),
                 "bundle_macro" | "source_module" | "output_type" | "qualifier" | "dependencies"
-                | "callable" => {
+                | "callable" | "registrations" => {
                     let value;
                     braced!(value in field_content);
                     match field.to_string().as_str() {
@@ -303,6 +314,13 @@ impl Parse for BundleRecord {
                             dependencies = Some(parsed);
                         }
                         "callable" => callable = Some(value.parse::<TokenStream2>()?),
+                        "registrations" => {
+                            let mut parsed = Vec::new();
+                            while !value.is_empty() {
+                                parsed.push(parse_record_registration(&value)?);
+                            }
+                            registrations = Some(parsed);
+                        }
                         _ => unreachable!("the field was matched above"),
                     }
                     if !value.is_empty() {
@@ -361,6 +379,7 @@ impl Parse for BundleRecord {
                 kind,
                 output_type: output_type.ok_or_else(|| content.error("missing output type"))?,
                 qualifier: qualifier.ok_or_else(|| content.error("missing qualifier field"))?,
+                registrations: Vec::new(),
                 dependencies: dependencies
                     .ok_or_else(|| content.error("missing dependency list"))?,
                 is_async,
@@ -368,8 +387,60 @@ impl Parse for BundleRecord {
                 wrapper: TokenStream2::new(),
             },
             callable: callable.ok_or_else(|| content.error("missing callable path"))?,
+            registrations: registrations.unwrap_or_default(),
         })
     }
+}
+
+fn parse_record_registration(input: ParseStream<'_>) -> syn::Result<BundleRegistration> {
+    let registration;
+    braced!(registration in input);
+    let keyword: Ident = registration.parse()?;
+    if keyword != "registration" {
+        return Err(syn::Error::new(
+            keyword.span(),
+            "expected registration metadata",
+        ));
+    }
+    let _: LitInt = registration.parse()?;
+    let mut target_type = None;
+    let mut target_qualifier = None;
+    let mut callable = None;
+    while !registration.is_empty() {
+        let field;
+        braced!(field in registration);
+        let name: Ident = field.parse()?;
+        let value;
+        braced!(value in field);
+        match name.to_string().as_str() {
+            "target_type" => target_type = Some(value.parse::<Type>()?),
+            "target_qualifier" => {
+                target_qualifier = Some(if value.is_empty() {
+                    None
+                } else {
+                    Some(value.parse::<LitStr>()?)
+                })
+            }
+            "callable" => callable = Some(value.parse::<TokenStream2>()?),
+            _ => {
+                return Err(syn::Error::new(
+                    name.span(),
+                    "unknown registration metadata field",
+                ));
+            }
+        }
+        if !value.is_empty() || !field.is_empty() {
+            return Err(field.error("unexpected tokens in registration metadata field"));
+        }
+    }
+    Ok(BundleRegistration {
+        target_type: target_type
+            .ok_or_else(|| registration.error("missing registration target type"))?,
+        target_qualifier: target_qualifier
+            .ok_or_else(|| registration.error("missing registration target qualifier field"))?,
+        callable: callable
+            .ok_or_else(|| registration.error("missing registration callable path"))?,
+    })
 }
 
 fn parse_record_dependency(input: ParseStream<'_>) -> syn::Result<Dependency> {
@@ -410,10 +481,35 @@ struct CompositionEntry {
     callable: TokenStream2,
     import_prefix: Option<Ident>,
     origin: String,
+    registrations: Vec<CompositionRegistration>,
+}
+
+struct CompositionRegistration {
+    target_type: Type,
+    target_qualifier: Option<LitStr>,
+    callable: TokenStream2,
+}
+
+fn local_registration(registration: &RegistrationCapability) -> CompositionRegistration {
+    let wrapper_name = &registration.wrapper_name;
+    CompositionRegistration {
+        target_type: registration.target_type.clone(),
+        target_qualifier: registration.target_qualifier.clone(),
+        callable: quote! { #wrapper_name },
+    }
 }
 
 impl CompositionEntry {
     fn from_import(record: BundleRecord, prefix: Ident, import_path: String) -> Self {
+        let registrations = record
+            .registrations
+            .into_iter()
+            .map(|registration| CompositionRegistration {
+                target_type: registration.target_type,
+                target_qualifier: registration.target_qualifier,
+                callable: registration.callable,
+            })
+            .collect();
         Self {
             origin: format!(
                 "bundle import `{import_path}` (module `{}`)",
@@ -422,6 +518,7 @@ impl CompositionEntry {
             declaration: record.declaration,
             callable: record.callable,
             import_prefix: Some(prefix),
+            registrations,
         }
     }
 
@@ -431,11 +528,17 @@ impl CompositionEntry {
             .into_iter()
             .map(|declaration| {
                 let wrapper_name = &declaration.wrapper_name;
+                let registrations = declaration
+                    .registrations
+                    .iter()
+                    .map(local_registration)
+                    .collect();
                 Self {
                     callable: quote! { #wrapper_name },
                     declaration,
                     import_prefix: None,
                     origin: format!("application module `{module_name}`"),
+                    registrations,
                 }
             })
             .collect()
@@ -457,10 +560,23 @@ struct PreparedDependency {
 struct PreparedEntry {
     key: Option<Key>,
     dependencies: Vec<PreparedDependency>,
+    registrations: Vec<PreparedRegistration>,
     callable: TokenStream2,
     is_async: bool,
     output_span: Span,
     origin: String,
+}
+
+struct PreparedRegistration {
+    request: Request,
+    callable: TokenStream2,
+    span: Span,
+}
+
+struct BoundRegistration {
+    registrar: ProviderId,
+    target: ProviderId,
+    callable: TokenStream2,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -525,9 +641,33 @@ fn compose_entries(entries: &[CompositionEntry]) -> syn::Result<TokenStream2> {
             graph_dependencies.push(request);
         }
 
+        if kind == EntryKind::Hook && !entry.registrations.is_empty() {
+            return Err(syn::Error::new(
+                entry.registrations[0].target_type.span(),
+                "registration capabilities are only supported on providers",
+            ));
+        }
+        let mut registrations = Vec::with_capacity(entry.registrations.len());
+        for registration in &entry.registrations {
+            let mut target_type = registration.target_type.clone();
+            if let Some(prefix) = &prefix_path {
+                rewrite_crate_prefix(&mut target_type, prefix);
+            }
+            validate_type(&target_type)?;
+            let span = target_type.span();
+            registrations.push(PreparedRegistration {
+                request: Request {
+                    key: make_key(&target_type, registration.target_qualifier.as_ref())?,
+                },
+                callable: registration.callable.clone(),
+                span,
+            });
+        }
+
         let prepared_entry = PreparedEntry {
             key: key.clone(),
             dependencies,
+            registrations,
             callable: entry.callable.clone(),
             is_async: entry.declaration.is_async,
             output_span,
@@ -557,6 +697,16 @@ fn compose_entries(entries: &[CompositionEntry]) -> syn::Result<TokenStream2> {
                         },
                         prepared_entry.origin.clone(),
                     );
+                }
+                for (registration_index, registration) in
+                    prepared_entry.registrations.iter().enumerate()
+                {
+                    let slot = RequestSlot::Registration {
+                        provider: provider_id,
+                        registration_index,
+                    };
+                    requester_spans.insert(slot, registration.span);
+                    requester_origins.insert(slot, prepared_entry.origin.clone());
                 }
             }
             EntryKind::Hook => {
@@ -596,11 +746,70 @@ fn compose_entries(entries: &[CompositionEntry]) -> syn::Result<TokenStream2> {
             &requester_origins,
         )
     })?;
+    let provider_index = ProviderIndex::new(&providers).map_err(|error| {
+        graph_diagnostic(
+            error,
+            &prepared,
+            &provider_entry_indices,
+            &requester_spans,
+            &requester_origins,
+        )
+    })?;
+    let reachable: HashSet<_> = plan.construction_order.iter().copied().collect();
+    let mut registrations = Vec::new();
+    for registrar in &plan.construction_order {
+        let entry_index = provider_entry_indices[registrar.0];
+        let entry = &prepared[entry_index];
+        for (registration_index, registration) in entry.registrations.iter().enumerate() {
+            let slot = RequestSlot::Registration {
+                provider: *registrar,
+                registration_index,
+            };
+            let target = provider_index
+                .resolve_request(&registration.request, slot)
+                .map_err(|error| {
+                    graph_diagnostic(
+                        error,
+                        &prepared,
+                        &provider_entry_indices,
+                        &requester_spans,
+                        &requester_origins,
+                    )
+                })?;
+            let target_key = &registration.request.key;
+            if target == *registrar {
+                return Err(syn::Error::new(
+                    registration.span,
+                    format!(
+                        "registration target {} resolves to its registering provider from {}; a provider cannot register itself",
+                        display_key(target_key),
+                        entry.origin
+                    ),
+                ));
+            }
+            if !reachable.contains(&target) {
+                return Err(syn::Error::new(
+                    registration.span,
+                    format!(
+                        "registration target {} from {} is not reachable from any hook",
+                        display_key(target_key),
+                        entry.origin
+                    ),
+                ));
+            }
+            registrations.push(BoundRegistration {
+                registrar: *registrar,
+                target,
+                callable: registration.callable.clone(),
+            });
+        }
+    }
     codegen(
         &prepared,
         &provider_entry_indices,
         &root_entry_indices,
         &plan,
+        &registrations,
     )
 }
 
@@ -781,12 +990,14 @@ fn codegen(
     provider_entry_indices: &[usize],
     root_entry_indices: &[usize],
     plan: &GraphPlan,
+    registrations: &[BoundRegistration],
 ) -> syn::Result<TokenStream2> {
     let bindings: HashMap<_, _> = plan
         .bindings
         .iter()
         .map(|binding| (binding.slot, binding.provider))
         .collect();
+    let mutable_targets: HashSet<_> = registrations.iter().map(|entry| entry.target).collect();
     let mut constructions = Vec::new();
     for provider_id in &plan.construction_order {
         let entry_index = provider_entry_indices[provider_id.0];
@@ -808,10 +1019,23 @@ fn codegen(
             .collect::<Vec<_>>();
         let callable = &entry.callable;
         let value = provider_value(*provider_id);
-        constructions.push(quote! {
-            let #value = #callable(#(#args),*);
-        });
+        if mutable_targets.contains(provider_id) {
+            constructions.push(quote! {
+                let mut #value = #callable(#(#args),*);
+            });
+        } else {
+            constructions.push(quote! {
+                let #value = #callable(#(#args),*);
+            });
+        }
     }
+
+    let registration_calls = registrations.iter().map(|registration| {
+        let registrar = provider_value(registration.registrar);
+        let target = provider_value(registration.target);
+        let callable = &registration.callable;
+        quote! { #callable(&#registrar, &mut #target); }
+    });
 
     let mut hooks = Vec::new();
     for (root_index, entry_index) in root_entry_indices.iter().enumerate() {
@@ -842,6 +1066,7 @@ fn codegen(
     Ok(quote! {
         pub async fn run() {
             #(#constructions)*
+            #(#registration_calls)*
             #(#hooks)*
         }
     })
